@@ -8,7 +8,7 @@ export interface Point {
 }
 
 export interface DetectedShape {
-  type: "circle" | "triangle" | "rectangle" | "pentagon" | "star";
+  type: "circle" | "triangle" | "rectangle" | "pentagon" | "star" | "square";
   confidence: number;
   boundingBox: {
     x: number;
@@ -41,26 +41,175 @@ export class ShapeDetector {
    * Method for detecting shapes in an image
    * @param imageData - ImageData from canvas
    * @returns Promise<DetectionResult> - Detection results
-   *
-   * TODO: Implement shape detection algorithm here
    */
   async detectShapes(imageData: ImageData): Promise<DetectionResult> {
     const startTime = performance.now();
 
-    // TODO: Implement shape detection algorithm
+    const { width, height, data } = imageData;
     const shapes: DetectedShape[] = [];
 
-    // Placeholder implementation
-    console.log("Shape detection not implemented yet");
-    console.log("Image dimensions:", imageData.width, "x", imageData.height);
+    // ---- Step 1: Convert to grayscale ----
+    const gray: number[] = new Array(width * height);
+    for (let i = 0; i < width * height; i++) {
+      const r = data[i * 4];
+      const g = data[i * 4 + 1];
+      const b = data[i * 4 + 2];
+      gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+    }
+
+    // ---- Step 2: Simple threshold (binarize) ----
+    const binary: number[] = new Array(width * height);
+    const threshold = 128;
+    for (let i = 0; i < gray.length; i++) {
+      binary[i] = gray[i] > threshold ? 1 : 0;
+    }
+
+    // ---- Helper to get index ----
+    const idx = (x: number, y: number) => y * width + x;
+
+    // ---- Step 3: Connected Components (flood fill) ----
+    const visited = new Uint8Array(width * height);
+    const dirs = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+      [1, 1],
+      [1, -1],
+      [-1, 1],
+      [-1, -1],
+    ];
+
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const i = idx(x, y);
+        if (binary[i] === 1 && !visited[i]) {
+          // Found a new blob
+          const queue: [number, number][] = [[x, y]];
+          const pixels: Point[] = [];
+          visited[i] = 1;
+
+          while (queue.length) {
+            const [cx, cy] = queue.pop()!;
+            pixels.push({ x: cx, y: cy });
+
+            for (const [dx, dy] of dirs) {
+              const nx = cx + dx,
+                ny = cy + dy;
+              if (
+                nx >= 0 &&
+                ny >= 0 &&
+                nx < width &&
+                ny < height &&
+                !visited[idx(nx, ny)] &&
+                binary[idx(nx, ny)] === 1
+              ) {
+                visited[idx(nx, ny)] = 1;
+                queue.push([nx, ny]);
+              }
+            }
+          }
+
+          // ---- Skip tiny blobs (noise) ----
+          if (pixels.length < 80) continue;
+
+          // ---- Step 4: Basic geometry ----
+          const xs = pixels.map((p) => p.x);
+          const ys = pixels.map((p) => p.y);
+          const minX = Math.min(...xs);
+          const maxX = Math.max(...xs);
+          const minY = Math.min(...ys);
+          const maxY = Math.max(...ys);
+
+          const w = maxX - minX + 1;
+          const h = maxY - minY + 1;
+          const cx = (minX + maxX) / 2;
+          const cy = (minY + maxY) / 2;
+          const area = pixels.length;
+
+          // Estimate perimeter (count edge pixels)
+          let border = 0;
+          for (const p of pixels) {
+            let edge = false;
+            for (const [dx, dy] of dirs) {
+              const nx = p.x + dx,
+                ny = p.y + dy;
+              if (
+                nx < 0 ||
+                ny < 0 ||
+                nx >= width ||
+                ny >= height ||
+                binary[idx(nx, ny)] === 0
+              ) {
+                edge = true;
+                break;
+              }
+            }
+            if (edge) border++;
+          }
+
+          // ---- Step 5: Shape classification ----
+          const circularity = (4 * Math.PI * area) / (border * border + 1e-6);
+          let shapeType: DetectedShape["type"] = "rectangle";
+          let confidence = 0.5;
+
+          if (circularity > 0.8) {
+            shapeType = "circle";
+            confidence = circularity;
+          } else {
+            const ratio = w / h > 1 ? w / h : h / w;
+
+            if (ratio < 1.2) {
+              shapeType = "square";
+              confidence = 0.7;
+            } else if (ratio >= 1.2 && ratio < 1.8) {
+              shapeType = "rectangle";
+              confidence = 0.7;
+            } else {
+              // Estimate corners
+              const step = Math.floor(border / 20);
+              let cornerCount = 0;
+              let prevAngle = 0;
+              for (let k = 0; k < pixels.length; k += step) {
+                const p1 = pixels[k];
+                const p2 = pixels[(k + step) % pixels.length];
+                const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+                const diff = Math.abs(angle - prevAngle);
+                if (diff > Math.PI / 3) cornerCount++;
+                prevAngle = angle;
+              }
+
+              if (cornerCount <= 3) {
+                shapeType = "triangle";
+                confidence = 0.6;
+              } else if (cornerCount === 5) {
+                shapeType = "pentagon";
+                confidence = 0.6;
+              } else if (cornerCount >= 7) {
+                shapeType = "star";
+                confidence = 0.6;
+              }
+            }
+          }
+
+          shapes.push({
+            type: shapeType,
+            confidence,
+            boundingBox: { x: minX, y: minY, width: w, height: h },
+            center: { x: cx, y: cy },
+            area,
+          });
+        }
+      }
+    }
 
     const processingTime = performance.now() - startTime;
 
     return {
       shapes,
       processingTime,
-      imageWidth: imageData.width,
-      imageHeight: imageData.height,
+      imageWidth: width,
+      imageHeight: height,
     };
   }
 
@@ -150,7 +299,9 @@ class ShapeDetectionApp {
     const { shapes, processingTime } = results;
 
     let html = `
-      <p><strong>Processing Time:</strong> ${processingTime.toFixed(2)}ms</p>
+      <p><strong>Processing Time:</strong> ${processingTime.toFixed(
+        2
+      )}ms</p>
       <p><strong>Shapes Found:</strong> ${shapes.length}</p>
     `;
 
@@ -241,7 +392,6 @@ class ShapeDetectionApp {
         this.selectionManager.toggleImageSelection(imageName);
       };
 
-      // Add upload functionality
       (window as any).triggerFileUpload = () => {
         this.imageInput.click();
       };
